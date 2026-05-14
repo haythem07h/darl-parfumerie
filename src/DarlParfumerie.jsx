@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+ import { useState, useEffect, useRef, useCallback } from "react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line } from "recharts";
 
 // ─── SUPABASE CONFIG ─────────────────────────────────────────────────────────
@@ -84,6 +84,23 @@ const sb = {
     });
     if (!r.ok) throw new Error(await r.text());
     return true;
+  },
+
+  // Storage : uploader une image
+  async uploadImage(file, token) {
+    const ext = file.name.split(".").pop();
+    const fileName = `product_${Date.now()}.${ext}`;
+    const r = await fetch(`${SUPABASE_URL}/storage/v1/object/product-images/${fileName}`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "Content-Type": file.type,
+        "x-upsert": "true",
+      },
+      body: file,
+    });
+    if (!r.ok) throw new Error(await r.text());
+    return `${SUPABASE_URL}/storage/v1/object/public/product-images/${fileName}`;
   },
 };
 
@@ -414,9 +431,12 @@ function ProductCard({ p, index, onView, onAdd }) {
         position:"relative", overflow:"hidden"
       }}
     >
-      <div onClick={onView} style={{ cursor:"pointer", height:280, display:"flex", alignItems:"center", justifyContent:"center", background:GRADIENTS[p.img]||GRADIENTS.oud, position:"relative" }}>
-        <div style={{ transform: hov ? "scale(1.06) translateY(-8px)" : "scale(1)", transition:"transform 0.5s ease" }}>
-          <Bottle type={p.img} size={200} />
+      <div onClick={onView} style={{ cursor:"pointer", height:280, display:"flex", alignItems:"center", justifyContent:"center", background:p.img_url?"#111":GRADIENTS[p.img]||GRADIENTS.oud, position:"relative", overflow:"hidden" }}>
+        <div style={{ transform: hov ? "scale(1.06) translateY(-8px)" : "scale(1)", transition:"transform 0.5s ease", width:"100%", height:"100%", display:"flex", alignItems:"center", justifyContent:"center" }}>
+          {p.img_url
+            ? <img src={p.img_url} alt={p.name} style={{ width:"100%", height:"100%", objectFit:"cover" }}/>
+            : <Bottle type={p.img} size={200} />
+          }
         </div>
         {p.featured && (
           <span style={{ position:"absolute", top:14, left:14, fontSize:9, letterSpacing:"0.25em", color:T.gold, border:`1px solid ${T.gold}44`, padding:"4px 10px", textTransform:"uppercase", background:"rgba(10,10,10,0.6)" }}>
@@ -507,8 +527,11 @@ function ProductDetail({ p, products, setPage, setSelected, addToCart }) {
       </div>
       <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:0, maxWidth:1200, margin:"0 auto", padding:"0 40px 80px" }}>
         <div style={{ paddingRight:56 }}>
-          <div style={{ height:500, display:"flex", alignItems:"center", justifyContent:"center", background:GRADIENTS[p.img], marginBottom:14 }}>
-            <Bottle type={p.img} size={300} />
+          <div style={{ height:500, display:"flex", alignItems:"center", justifyContent:"center", background:p.img_url?"#111":GRADIENTS[p.img], marginBottom:14, overflow:"hidden" }}>
+            {p.img_url
+              ? <img src={p.img_url} alt={p.name} style={{ width:"100%", height:"100%", objectFit:"cover" }}/>
+              : <Bottle type={p.img} size={300} />
+            }
           </div>
           <div style={{ display:"flex", gap:8 }}>
             {[0,1,2].map(i => (
@@ -1117,7 +1140,7 @@ function Dashboard({ orders, products }) {
 }
 
 const CATEGORIES = ["Homme","Femme","Mixte","Oud"];
-const emptyProductForm = () => ({ name:"", brand:"Darl Parfumerie", category:"Homme", price:"", stock:"", volume:100, short:"", description:"", topNotes:"", heartNotes:"", baseNotes:"", featured:false, available:true, img:"oud" });
+const emptyProductForm = () => ({ name:"", brand:"Darl Parfumerie", category:"Homme", price:"", stock:"", volume:100, short:"", description:"", topNotes:"", heartNotes:"", baseNotes:"", featured:false, available:true, img:"oud", img_url:null });
 
 // FIX: FieldInput doit être HORS de ProductsAdmin pour éviter la perte de focus
 function FieldInput({ value, onChange, label, ...rest }) {
@@ -1134,13 +1157,25 @@ function ProductsAdmin({ products, setProducts, showToast, authToken }) {
   const [form, setForm] = useState(emptyProductForm());
   const [delConfirm, setDelConfirm] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [imgFile, setImgFile] = useState(null);
+  const [imgPreview, setImgPreview] = useState(null);
+  const imgInputRef = useRef(null);
 
-  const openAdd = () => { setForm(emptyProductForm()); setModal("add"); };
+  const handleImgChange = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setImgFile(file);
+    setImgPreview(URL.createObjectURL(file));
+  };
+
+  const openAdd = () => { setForm(emptyProductForm()); setImgFile(null); setImgPreview(null); setModal("add"); };
   const openEdit = (p) => {
     setForm({ ...p, price:p.price, stock:p.stock,
       topNotes:(p.notes?.top||p.scent_notes?.top||[]).join(", "),
       heartNotes:(p.notes?.heart||p.scent_notes?.heart||[]).join(", "),
       baseNotes:(p.notes?.base||p.scent_notes?.base||[]).join(", ") });
+    setImgFile(null);
+    setImgPreview(p.img_url||null);
     setModal(p);
   };
 
@@ -1152,12 +1187,26 @@ function ProductsAdmin({ products, setProducts, showToast, authToken }) {
       heart: (form.heartNotes||"").split(",").map(s=>s.trim()).filter(Boolean),
       base:  (form.baseNotes||"").split(",").map(s=>s.trim()).filter(Boolean),
     };
+    // Upload image if selected
+    let uploadedImgUrl = form.img_url || null;
+    if (imgFile) {
+      try {
+        uploadedImgUrl = await sb.uploadImage(imgFile, authToken);
+      } catch(e) {
+        console.error("Image upload error:", e);
+        showToast("Erreur upload image: " + e.message);
+        setSaving(false);
+        return;
+      }
+    }
+
     const productData = {
       name: form.name, brand: form.brand, category: form.category,
       price: +form.price, stock: +form.stock, volume_ml: +form.volume,
       short_description: form.short, description: form.description,
       scent_notes: notes, is_featured: !!form.featured,
       is_available: !!form.available, img_key: form.img||"oud",
+      img_url: uploadedImgUrl,
     };
     try {
       if (modal === "add") {
@@ -1319,6 +1368,40 @@ function ProductsAdmin({ products, setProducts, showToast, authToken }) {
               <div style={{ marginBottom:14 }}>
                 <label>Description complète</label>
                 <textarea value={form.description||""} onChange={e=>setForm({...form,description:e.target.value})} rows={4}/>
+              </div>
+
+              {/* IMAGE UPLOAD */}
+              <div style={{ marginBottom:22 }}>
+                <p style={{ fontSize:9, letterSpacing:"0.25em", color:T.gold, textTransform:"uppercase", marginBottom:14, paddingBottom:9, borderBottom:`1px solid ${T.border}` }}>Photo du Produit</p>
+                <input
+                  ref={imgInputRef}
+                  type="file"
+                  accept="image/*"
+                  onChange={handleImgChange}
+                  style={{ display:"none" }}
+                />
+                <div style={{ display:"flex", gap:14, alignItems:"center" }}>
+                  {imgPreview ? (
+                    <div style={{ position:"relative", width:90, height:90, flexShrink:0 }}>
+                      <img src={imgPreview} alt="preview" style={{ width:90, height:90, objectFit:"cover", border:`1px solid ${T.border}` }}/>
+                      <button onClick={() => { setImgFile(null); setImgPreview(null); setForm({...form, img_url:null}); }} style={{
+                        position:"absolute", top:-7, right:-7, width:20, height:20, borderRadius:"50%",
+                        background:"#CC4444", border:"none", color:"#fff", fontSize:12, cursor:"pointer",
+                        display:"flex", alignItems:"center", justifyContent:"center"
+                      }}>×</button>
+                    </div>
+                  ) : (
+                    <div style={{ width:90, height:90, border:`2px dashed ${T.border}`, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
+                      <span style={{ fontSize:24, color:T.muted }}>📷</span>
+                    </div>
+                  )}
+                  <div>
+                    <button className="ao" onClick={() => imgInputRef.current?.click()} style={{ padding:"10px 20px", fontSize:10, marginBottom:8, display:"block" }}>
+                      {imgPreview ? "Changer la Photo" : "📁 Choisir une Photo"}
+                    </button>
+                    <p style={{ fontSize:10, color:T.muted }}>JPG, PNG, WEBP — max 5MB</p>
+                  </div>
+                </div>
               </div>
               <div style={{ marginBottom:26 }}>
                 <p style={{ fontSize:9, letterSpacing:"0.25em", color:T.gold, textTransform:"uppercase", marginBottom:14, paddingBottom:9, borderBottom:`1px solid ${T.border}` }}>Pyramide Olfactive</p>
