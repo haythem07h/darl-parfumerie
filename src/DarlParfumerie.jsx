@@ -1,4 +1,4 @@
- import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line } from "recharts";
 
 // ─── SUPABASE CONFIG ─────────────────────────────────────────────────────────
@@ -73,6 +73,17 @@ const sb = {
     });
     if (!r.ok) throw new Error(await r.text());
     return r.json();
+  },
+
+  // DB : supprimer
+  async delete(table, match, token) {
+    const query = Object.entries(match).map(([k, v]) => `${k}=eq.${v}`).join("&");
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${query}`, {
+      method: "DELETE",
+      headers: { ...this.headers, Authorization: `Bearer ${token}` },
+    });
+    if (!r.ok) throw new Error(await r.text());
+    return true;
   },
 };
 
@@ -1108,6 +1119,16 @@ function Dashboard({ orders, products }) {
 const CATEGORIES = ["Homme","Femme","Mixte","Oud"];
 const emptyProductForm = () => ({ name:"", brand:"Darl Parfumerie", category:"Homme", price:"", stock:"", volume:100, short:"", description:"", topNotes:"", heartNotes:"", baseNotes:"", featured:false, available:true, img:"oud" });
 
+// FIX: FieldInput doit être HORS de ProductsAdmin pour éviter la perte de focus
+function FieldInput({ value, onChange, label, ...rest }) {
+  return (
+    <div>
+      <label>{label}</label>
+      <input value={value||""} onChange={onChange} {...rest}/>
+    </div>
+  );
+}
+
 function ProductsAdmin({ products, setProducts, showToast, authToken }) {
   const [modal, setModal] = useState(null);
   const [form, setForm] = useState(emptyProductForm());
@@ -1117,9 +1138,9 @@ function ProductsAdmin({ products, setProducts, showToast, authToken }) {
   const openAdd = () => { setForm(emptyProductForm()); setModal("add"); };
   const openEdit = (p) => {
     setForm({ ...p, price:p.price, stock:p.stock,
-      topNotes:(p.notes?.top||[]).join(", "),
-      heartNotes:(p.notes?.heart||[]).join(", "),
-      baseNotes:(p.notes?.base||[]).join(", ") });
+      topNotes:(p.notes?.top||p.scent_notes?.top||[]).join(", "),
+      heartNotes:(p.notes?.heart||p.scent_notes?.heart||[]).join(", "),
+      baseNotes:(p.notes?.base||p.scent_notes?.base||[]).join(", ") });
     setModal(p);
   };
 
@@ -1127,36 +1148,57 @@ function ProductsAdmin({ products, setProducts, showToast, authToken }) {
     if (!form.name || !form.price) { showToast("Nom et prix sont obligatoires"); return; }
     setSaving(true);
     const notes = {
-      top:   form.topNotes.split(",").map(s=>s.trim()).filter(Boolean),
-      heart: form.heartNotes.split(",").map(s=>s.trim()).filter(Boolean),
-      base:  form.baseNotes.split(",").map(s=>s.trim()).filter(Boolean),
+      top:   (form.topNotes||"").split(",").map(s=>s.trim()).filter(Boolean),
+      heart: (form.heartNotes||"").split(",").map(s=>s.trim()).filter(Boolean),
+      base:  (form.baseNotes||"").split(",").map(s=>s.trim()).filter(Boolean),
     };
-    if (modal === "add") {
-      const newP = { ...form, id:Date.now(), price:+form.price, stock:+form.stock, volume:+form.volume, notes };
-      setProducts(prev => [...prev, newP]);
-      showToast(`${form.name} ajouté`);
-    } else {
-      setProducts(prev => prev.map(p => p.id===modal.id ? {...p,...form, price:+form.price, stock:+form.stock, volume:+form.volume, notes} : p));
-      showToast(`${form.name} modifié`);
+    const productData = {
+      name: form.name, brand: form.brand, category: form.category,
+      price: +form.price, stock: +form.stock, volume_ml: +form.volume,
+      short_description: form.short, description: form.description,
+      scent_notes: notes, is_featured: !!form.featured,
+      is_available: !!form.available, img_key: form.img||"oud",
+    };
+    try {
+      if (modal === "add") {
+        const inserted = await sb.insert("products", productData, authToken);
+        const newP = Array.isArray(inserted) ? inserted[0] : inserted;
+        const normalized = { ...newP, notes, available: newP.is_available, featured: newP.is_featured, img: newP.img_key, volume: newP.volume_ml, short: newP.short_description };
+        setProducts(prev => [...prev, normalized]);
+        showToast(`${form.name} ajouté`);
+      } else {
+        await sb.update("products", { id: modal.id }, productData, authToken);
+        setProducts(prev => prev.map(p => p.id===modal.id ? {...p,...form, price:+form.price, stock:+form.stock, volume:+form.volume, notes, available:!!form.available, featured:!!form.featured} : p));
+        showToast(`${form.name} modifié`);
+      }
+    } catch(e) {
+      console.error("Save error:", e);
+      showToast("Erreur lors de la sauvegarde: " + e.message);
     }
     setSaving(false);
     setModal(null);
   };
 
-  const del = (id) => {
+  const del = async (id) => {
+    try {
+      await sb.delete("products", { id }, authToken);
+    } catch(e) {
+      console.error("Delete error:", e);
+    }
     setProducts(prev => prev.filter(p=>p.id!==id));
     showToast("Produit supprimé");
     setDelConfirm(null);
   };
 
-  const toggle = (id) => setProducts(prev => prev.map(p=>p.id===id?{...p,available:!p.available}:p));
-
-  const F = ({ k, label, ...rest }) => (
-    <div>
-      <label>{label}</label>
-      <input value={form[k]||""} onChange={e=>setForm({...form,[k]:e.target.value})} {...rest}/>
-    </div>
-  );
+  const toggle = async (id, currentVal) => {
+    const newVal = !currentVal;
+    try {
+      await sb.update("products", { id }, { is_available: newVal }, authToken);
+    } catch(e) {
+      console.error("Toggle error:", e);
+    }
+    setProducts(prev => prev.map(p=>p.id===id?{...p,available:newVal,is_available:newVal}:p));
+  };
 
   return (
     <div className="fa" style={{ padding:40 }}>
@@ -1196,7 +1238,7 @@ function ProductsAdmin({ products, setProducts, showToast, authToken }) {
                   <span style={{ fontSize:13, color: p.stock===0?"#CC4444":p.stock<=5?"#E8A030":T.text }}>{p.stock}</span>
                 </td>
                 <td style={{ padding:"15px 17px" }}>
-                  <button onClick={() => toggle(p.id)} style={{
+                  <button onClick={() => toggle(p.id, p.available||p.is_available)} style={{
                     width:42, height:22, borderRadius:11,
                     background:p.available?T.gold:"#2A2A2A", border:"none", cursor:"pointer",
                     position:"relative", transition:"background 0.3s"
@@ -1243,8 +1285,8 @@ function ProductsAdmin({ products, setProducts, showToast, authToken }) {
             </div>
             <div style={{ padding:"28px 30px" }}>
               <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14, marginBottom:14 }}>
-                <F k="name" label="Nom du Produit *" placeholder="OUD ROYAL"/>
-                <F k="brand" label="Marque"/>
+                <FieldInput value={form["name"]||""} onChange={e=>setForm({...form,name:e.target.value})} label="Nom du Produit *" placeholder="OUD ROYAL"/>
+                <FieldInput value={form["brand"]||""} onChange={e=>setForm({...form,brand:e.target.value})} label="Marque"/>
               </div>
               <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:14, marginBottom:14 }}>
                 <div>
@@ -1256,11 +1298,11 @@ function ProductsAdmin({ products, setProducts, showToast, authToken }) {
                     <span style={{ position:"absolute", right:11, top:"50%", transform:"translateY(-50%)", color:T.gold, pointerEvents:"none" }}>▾</span>
                   </div>
                 </div>
-                <F k="price" label="Prix (DA) *" type="number" placeholder="3500"/>
-                <F k="volume" label="Volume (ml)" type="number"/>
+                <FieldInput value={form["price"]||""} onChange={e=>setForm({...form,price:e.target.value})} label="Prix (DA) *" type="number" placeholder="3500"/>
+                <FieldInput value={form["volume"]||""} onChange={e=>setForm({...form,volume:e.target.value})} label="Volume (ml)" type="number"/>
               </div>
               <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14, marginBottom:14 }}>
-                <F k="stock" label="Stock" type="number" placeholder="10"/>
+                <FieldInput value={form["stock"]||""} onChange={e=>setForm({...form,stock:e.target.value})} label="Stock" type="number" placeholder="10"/>
                 <div style={{ display:"flex", gap:18, alignItems:"flex-end", paddingBottom:2 }}>
                   {[["featured","Bestseller"],["available","Disponible"]].map(([k,l]) => (
                     <label key={k} style={{ display:"flex", alignItems:"center", gap:7, cursor:"pointer", marginBottom:0 }}>
@@ -1592,9 +1634,22 @@ function AdminPanel({ onExit }) {
     Promise.all([
       sb.from("orders", "?order=created_at.desc&limit=200").catch(() => []),
       sb.from("delivery_prices", "?order=wilaya_code.asc").catch(() => []),
-    ]).then(([ordersData, deliveryData]) => {
+      sb.from("products", "?order=created_at.asc").catch(() => []),
+    ]).then(([ordersData, deliveryData, productsData]) => {
       if (Array.isArray(ordersData) && ordersData.length > 0) setOrders(ordersData);
       if (Array.isArray(deliveryData) && deliveryData.length > 0) setDeliveryPrices(deliveryData);
+      if (Array.isArray(productsData) && productsData.length > 0) {
+        // Normaliser les champs Supabase vers le format local
+        setProducts(productsData.map(p => ({
+          ...p,
+          notes: p.scent_notes || {top:[],heart:[],base:[]},
+          available: p.is_available,
+          featured: p.is_featured,
+          img: p.img_key || "oud",
+          volume: p.volume_ml || 100,
+          short: p.short_description || "",
+        })));
+      }
     }).finally(() => setLoadingData(false));
   }, [authToken]);
 
@@ -1671,7 +1726,7 @@ function AdminPanel({ onExit }) {
 export default function App() {
   const [mode, setMode]     = useState("store");
   const [page, setPage]     = useState("home");
-  const [products]          = useState(PRODUCTS_INIT);
+  const [products, setProducts] = useState(PRODUCTS_INIT);
   const [cart, setCart]     = useState([]);
   const [cartOpen, setCartOpen] = useState(false);
   const [selected, setSelected] = useState(null);
@@ -1680,11 +1735,26 @@ export default function App() {
 
   const showToast = useCallback((msg) => setToast(msg), []);
 
-  // Charger les prix de livraison depuis Supabase au démarrage
+  // Charger les prix de livraison et produits depuis Supabase au démarrage
   useEffect(() => {
     sb.from("delivery_prices", "?order=wilaya_code.asc")
       .then(data => { if (Array.isArray(data) && data.length > 0) setDeliveryPrices(data); })
-      .catch(() => {}); // Silencieux si pas configuré
+      .catch(() => {});
+    sb.from("products", "?is_available=eq.true&order=created_at.asc")
+      .then(data => {
+        if (Array.isArray(data) && data.length > 0) {
+          setProducts(data.map(p => ({
+            ...p,
+            notes: p.scent_notes || {top:[],heart:[],base:[]},
+            available: p.is_available,
+            featured: p.is_featured,
+            img: p.img_key || "oud",
+            volume: p.volume_ml || 100,
+            short: p.short_description || "",
+          })));
+        }
+      })
+      .catch(() => {});
   }, []);
 
   const addToCart = useCallback((p) => {
